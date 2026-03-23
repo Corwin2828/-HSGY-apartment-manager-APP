@@ -1,0 +1,328 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "linux-arm64-openssl-3.0.x"]
+}
+
+datasource db {
+  provider     = "mysql"
+  url          = env("DATABASE_URL")
+  directUrl    = env("DIRECT_DATABASE_URL")
+  relationMode = "foreignKeys"
+}
+
+enum Role {
+  SUPERADMIN
+  LANDLORD
+  ADMIN
+  TENANT
+}
+
+enum RoomStatus {
+  EMPTY
+  OCCUPIED
+  MAINTAINING
+}
+
+enum RepairStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+}
+
+enum RefundStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  REFUNDED
+  FAILED
+}
+
+model Building {
+  id         Int             @id @default(autoincrement())
+  name       String          @db.VarChar(100)
+  address    String?         @db.VarChar(255)
+  landlordId Int
+  landlord   User            @relation("LandlordBuildings", fields: [landlordId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  rooms      Room[]
+  admins     AdminBuilding[]
+  contracts  Contract[]
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+
+  @@index([landlordId])
+  @@index([name])
+}
+
+model Room {
+  id               Int                    @id @default(autoincrement())
+  buildingId       Int
+  building         Building               @relation(fields: [buildingId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  roomNumber       String                 @db.VarChar(50)
+  status           RoomStatus             @default(EMPTY)
+  rentPrice        Decimal?               @db.Decimal(10, 2)
+  depositAmount    Decimal?               @db.Decimal(10, 2) // 押金金额（房东设置）
+  waterUnitPrice   Decimal?               @db.Decimal(10, 2)
+  elecUnitPrice    Decimal?               @db.Decimal(10, 2)
+  tenantId         Int?                   @unique
+  tenant           Tenant?                @relation("RoomPrimaryTenant", fields: [tenantId], references: [userId], onDelete: SetNull, onUpdate: Cascade)
+  assignedTenants  Tenant[]               @relation("TenantAssignedRoom")
+  coTenants        CoTenant[]
+  checkInDate      DateTime?
+  expectedCheckOut DateTime?
+  meterRecords     WaterElecRecord[]
+  repairs          Repair[]
+  depositRecords   DepositRecord[]
+  refundRequests   DepositRefundRequest[]
+  contracts        Contract[]
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+
+  @@unique([buildingId, roomNumber])
+  @@index([buildingId, status])
+  @@index([tenantId])
+}
+
+model User {
+  id                     Int                    @id @default(autoincrement())
+  phone                  String                 @unique @db.VarChar(20)
+  password               String                 @db.VarChar(255)
+  role                   Role
+  name                   String?                @db.VarChar(100)
+  mustChangePassword     Boolean                @default(false)
+  buildings              Building[]             @relation("LandlordBuildings")
+  admin                  Admin?
+  tenant                 Tenant?
+  handledRepairs         Repair[]               @relation("RepairHandler")
+  approvedRefundRequests DepositRefundRequest[] @relation("RefundApprover")
+  createdMeterRecords    WaterElecRecord[]      @relation("MeterRecordCreator")
+  operationLogs          OperationLog[]
+  landlordSettings       Setting[]              @relation("LandlordSettings")
+  createdAt              DateTime               @default(now())
+  updatedAt              DateTime               @updatedAt
+
+  @@index([role])
+  @@index([name])
+}
+
+model Admin {
+  userId           Int             @id @unique
+  user             User            @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  permissions      Json?           // { canSetRent: boolean, canEditBasicInfo: boolean, canEditIdCard: boolean }
+  managedBuildings AdminBuilding[]
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+}
+
+model AdminBuilding {
+  adminId    Int
+  buildingId Int
+  admin      Admin    @relation(fields: [adminId], references: [userId], onDelete: Cascade, onUpdate: Cascade)
+  building   Building @relation(fields: [buildingId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@id([adminId, buildingId])
+  @@index([buildingId])
+}
+
+model Tenant {
+  userId          Int                    @id @unique
+  user            User                   @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  roomId          Int?
+  room            Room?                  @relation("TenantAssignedRoom", fields: [roomId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  primaryRoom     Room?                  @relation("RoomPrimaryTenant")
+  idCard          String?                @db.Text // AES-256-GCM 加密后存储
+  gender          String?                @db.VarChar(20)
+  coTenants       CoTenant[]
+  payments        Payment[]
+  repairs         Repair[]
+  depositRecords  DepositRecord[]
+  refundRequests  DepositRefundRequest[]
+  contracts       Contract[]
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+
+  @@index([roomId])
+}
+
+model CoTenant {
+  id        Int      @id @default(autoincrement())
+  tenantId  Int
+  tenant    Tenant   @relation(fields: [tenantId], references: [userId], onDelete: Cascade, onUpdate: Cascade)
+  roomId    Int?
+  room      Room?    @relation(fields: [roomId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  name      String   @db.VarChar(100)
+  gender    String?  @db.VarChar(20)
+  idCard    String?  @db.Text // 加密
+  phone     String?  @db.VarChar(20)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([roomId])
+  @@index([phone])
+}
+
+model WaterElecRecord {
+  id        Int      @id @default(autoincrement())
+  roomId    Int
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  type      String   @db.VarChar(20) // water / elec
+  reading   Decimal  @db.Decimal(12, 2)
+  amount    Decimal  @db.Decimal(10, 2)
+  photoUrl  String?  @db.VarChar(500)
+  month     String   @db.VarChar(7) // YYYY-MM
+  createdBy Int
+  creator   User     @relation("MeterRecordCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  createdAt DateTime @default(now())
+
+  @@index([roomId, month, type])
+  @@index([createdBy, createdAt])
+}
+
+model Repair {
+  id             Int          @id @default(autoincrement())
+  roomId         Int
+  room           Room         @relation(fields: [roomId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  tenantId       Int
+  tenant         Tenant       @relation(fields: [tenantId], references: [userId], onDelete: Cascade, onUpdate: Cascade)
+  description    String       @db.Text
+  photos         Json?
+  status         RepairStatus @default(PENDING)
+  handlerId      Int?
+  handler        User?        @relation("RepairHandler", fields: [handlerId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  completePhotos Json?
+  completedAt    DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([roomId, status])
+  @@index([tenantId, createdAt])
+  @@index([handlerId, status])
+}
+
+model Payment {
+  id            Int      @id @default(autoincrement())
+  tenantId      Int
+  tenant        Tenant   @relation(fields: [tenantId], references: [userId], onDelete: Cascade, onUpdate: Cascade)
+  type          String   @db.VarChar(30) // rent / water / elec / deposit / deposit_refund
+  amount        Decimal  @db.Decimal(10, 2)
+  month         String?  @db.VarChar(7) // YYYY-MM
+  status        String   @db.VarChar(30)
+  payMethod     String?  @db.VarChar(30)
+  transactionId String?  @db.VarChar(100)
+  paidAt        DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, month, type])
+  @@index([status])
+  @@index([transactionId])
+}
+
+model DepositRecord {
+  id            Int                   @id @default(autoincrement())
+  roomId        Int
+  room          Room                  @relation(fields: [roomId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  tenantId      Int
+  tenant        Tenant                @relation(fields: [tenantId], references: [userId], onDelete: Cascade, onUpdate: Cascade)
+  amount        Decimal               @db.Decimal(10, 2)
+  status        String                @db.VarChar(30) // unpaid / paid / refunded
+  payMethod     String?               @db.VarChar(30)
+  transactionId String?               @db.VarChar(100)
+  paidAt        DateTime?
+  refundRequest DepositRefundRequest?
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+
+  @@index([roomId, tenantId])
+  @@index([status])
+  @@index([transactionId])
+}
+
+model DepositRefundRequest {
+  id               Int            @id @default(autoincrement())
+  roomId           Int
+  room             Room           @relation(fields: [roomId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  tenantId         Int
+  tenant           Tenant         @relation(fields: [tenantId], references: [userId], onDelete: Restrict, onUpdate: Cascade)
+  depositRecordId  Int            @unique
+  depositRecord    DepositRecord  @relation(fields: [depositRecordId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reason           String?        @db.Text
+  photos           Json?
+  expectedCheckOut DateTime?
+  status           RefundStatus   @default(PENDING)
+  approverId       Int?
+  approver         User?          @relation("RefundApprover", fields: [approverId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  approvedAt       DateTime?
+  refundOrder      RefundOrder?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([roomId, status])
+  @@index([tenantId, status])
+  @@index([approverId])
+}
+
+model RefundOrder {
+  id              Int                  @id @default(autoincrement())
+  refundRequestId Int                  @unique
+  refundRequest   DepositRefundRequest @relation(fields: [refundRequestId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  amount          Decimal              @db.Decimal(10, 2)
+  transactionId   String?              @db.VarChar(100)
+  status          String               @db.VarChar(30)
+  failReason      String?              @db.Text
+  refundedAt      DateTime?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  @@index([status])
+  @@index([transactionId])
+}
+
+model Contract {
+  id            Int       @id @default(autoincrement())
+  buildingId    Int?
+  building      Building? @relation(fields: [buildingId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  roomId        Int?
+  room          Room?     @relation(fields: [roomId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  tenantId      Int?
+  tenant        Tenant?   @relation(fields: [tenantId], references: [userId], onDelete: SetNull, onUpdate: Cascade)
+  tencentFlowId String?   @unique @db.VarChar(100)
+  status        String    @db.VarChar(30) // draft / signed / expired
+  pdfUrl        String?   @db.VarChar(500) // COS
+  signTime      DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([buildingId])
+  @@index([roomId])
+  @@index([tenantId])
+  @@index([status])
+}
+
+model Setting {
+  id         Int      @id @default(autoincrement())
+  key        String   @unique @db.VarChar(100)
+  value      String   @db.Text
+  landlordId Int?
+  landlord   User?    @relation("LandlordSettings", fields: [landlordId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([landlordId])
+}
+
+model OperationLog {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  action    String   @db.VarChar(100)
+  targetId  Int?
+  details   Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+  @@index([targetId])
+}
